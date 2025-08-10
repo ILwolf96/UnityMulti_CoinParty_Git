@@ -9,8 +9,8 @@ public class NetworkManager : MonoBehaviour, INetworkRunnerCallbacks
 {
     public static NetworkManager Instance { get; private set; }
 
-    [Header("Player prefab (NetworkObject)")]
-    [SerializeField] private NetworkPrefabRef playerPrefab;
+    //[Header("Player prefab (NetworkObject)")]
+    //[SerializeField] private NetworkPrefabRef playerPrefab;
 
     private NetworkRunner _runner;
     public NetworkRunner Runner => _runner;

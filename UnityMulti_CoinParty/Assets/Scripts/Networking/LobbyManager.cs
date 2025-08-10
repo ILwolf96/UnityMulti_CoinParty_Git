@@ -1,35 +1,36 @@
 using System.Collections.Generic;
+using System.Threading.Tasks;
 using UnityEngine;
+using UnityEngine.UI;
+using TMPro;
 using Fusion;
 using Fusion.Sockets;
-using TMPro;
-using UnityEngine.UI;
-using System.Threading.Tasks;
 using UnityEngine.SceneManagement;
 
 public class LobbyManager : MonoBehaviour, INetworkRunnerCallbacks
 {
-    [Header("Lobby UI Elements")]
+    [Header("Intro Panel (first screen)")]
+    [SerializeField] private GameObject introPanel = null;           // The very first screen with "Join Lobby" button
     [SerializeField] private Button joinLobbyButton = null;
 
-    [SerializeField] private Transform sessionListContainer = null;
-    [SerializeField] private GameObject sessionButtonPrefab = null;
-
-    [Header("Session Creation UI")]
-    [SerializeField] private TMP_InputField sessionNameInput = null;
+    [Header("Lobby Panel (session list and create/join UI)")]
+    [SerializeField] private GameObject lobbyPanel = null;           // Panel that holds session list ScrollView and session creation UI
+    [SerializeField] private Transform sessionListContainer = null;  // ScrollView Content container for session buttons
+    [SerializeField] private GameObject sessionButtonPrefab = null;  // Prefab for session buttons
+    [SerializeField] private TMP_InputField sessionNameInput = null; // Input field for new session name
     [SerializeField] private Button createSessionButton = null;
 
-    [Header("Room UI")]
-    [SerializeField] private GameObject roomPanel = null;
-    [SerializeField] private Transform playerListContainer = null;
-    [SerializeField] private GameObject playerTextPrefab = null;
-    [SerializeField] private Button leaveRoomButton = null;
+    [Header("Session Panel (in-session UI)")]
+    [SerializeField] private GameObject sessionPanel = null;         // Panel shown when inside a session/room
+    [SerializeField] private Transform playerListContainer = null;   // Container for player names list inside session
+    [SerializeField] private GameObject playerTextPrefab = null;     // Prefab for displaying player names
+    [SerializeField] private Button leaveSessionButton = null;       // Button to leave the session
 
     [Header("Leave Lobby UI")]
-    [SerializeField] private Button leaveLobbyButton = null;
+    [SerializeField] private Button leaveLobbyButton = null;         // Button to leave lobby (session list) screen
 
-    [Header("Confirmation UI")]
-    [SerializeField] private GameObject confirmationPanel = null;
+    [Header("Confirmation UI (modal)")]
+    [SerializeField] private GameObject confirmationPanel = null;    // Popup panel for confirmation dialogs
     [SerializeField] private TMP_Text confirmationText = null;
     [SerializeField] private Button confirmationYesButton = null;
     [SerializeField] private Button confirmationNoButton = null;
@@ -40,6 +41,7 @@ public class LobbyManager : MonoBehaviour, INetworkRunnerCallbacks
     [Header("Settings")]
     [SerializeField] private int maxPlayersPerSession = 6;
 
+    [Header("Allowed player names (editable in Inspector)")]
     [SerializeField]
     private List<string> allowedPlayerNames = new List<string>()
     {
@@ -49,15 +51,16 @@ public class LobbyManager : MonoBehaviour, INetworkRunnerCallbacks
     private NetworkRunner _runner;
     public NetworkRunner Runner => _runner;
 
-    private bool _inRoom = false;
+    private bool _inSession = false;
     private string _desiredSessionName = "";
 
-    private Dictionary<PlayerRef, string> _playerNameMap = new Dictionary<PlayerRef, string>();
+    private readonly Dictionary<PlayerRef, string> _playerNameMap = new Dictionary<PlayerRef, string>();
 
     public static LobbyManager Instance { get; private set; }
 
     private void Awake()
     {
+        // Singleton pattern to persist LobbyManager instance across scenes
         if (Instance != null && Instance != this)
         {
             Destroy(gameObject);
@@ -67,58 +70,66 @@ public class LobbyManager : MonoBehaviour, INetworkRunnerCallbacks
         DontDestroyOnLoad(gameObject);
     }
 
-    private void Start()
+    private async void Start()
     {
-        _runner = NetworkManager.Instance?.Runner;
+        await EnsureRunner();
+
+        if (_runner != null)
+        {
+            _runner.ProvideInput = true;
+            _runner.AddCallbacks(this);
+        }
+
+        // Initial UI state
+        if (introPanel != null) introPanel.SetActive(true);
+        if (lobbyPanel != null) lobbyPanel.SetActive(false);
+        if (sessionPanel != null) sessionPanel.SetActive(false);
+        if (confirmationPanel != null) confirmationPanel.SetActive(false);
+
+        // Button listeners
+        if (joinLobbyButton != null) joinLobbyButton.onClick.AddListener(OnJoinLobbyClicked);
+        if (createSessionButton != null) createSessionButton.onClick.AddListener(() => OnJoinOrCreateClicked(true));
+        if (leaveSessionButton != null) leaveSessionButton.onClick.AddListener(LeaveSessionAsync);
+        if (leaveLobbyButton != null) leaveLobbyButton.onClick.AddListener(LeaveLobbyAsync);
+
+        if (confirmationYesButton != null) confirmationYesButton.onClick.AddListener(OnConfirmationYes);
+        if (confirmationNoButton != null) confirmationNoButton.onClick.AddListener(OnConfirmationNo);
+    }
+
+    private async Task EnsureRunner()
+    {
+        _runner = FindObjectOfType<NetworkRunner>();
+
         if (_runner == null)
         {
-            Debug.LogError("LobbyManager: Could not find NetworkRunner from NetworkManager.");
-            return;
+            GameObject go = new GameObject("NetworkRunner");
+            _runner = go.AddComponent<NetworkRunner>();
+
+            if (_runner.GetComponent<NetworkSceneManagerDefault>() == null)
+                _runner.gameObject.AddComponent<NetworkSceneManagerDefault>();
         }
 
-        _runner.ProvideInput = true;
-        _runner.AddCallbacks(this);
-
-        joinLobbyButton.interactable = true;
-        createSessionButton.interactable = true;
-        leaveRoomButton.interactable = false;
-        leaveLobbyButton.interactable = false;
-
-        sessionListContainer.gameObject.SetActive(false);
-        roomPanel.SetActive(false);
-        confirmationPanel.SetActive(false);
-
-        joinLobbyButton.onClick.AddListener(() => OnJoinOrCreateClicked(false));
-        createSessionButton.onClick.AddListener(() => OnJoinOrCreateClicked(true));
-        leaveRoomButton.onClick.AddListener(LeaveRoomAsync);
-        leaveLobbyButton.onClick.AddListener(LeaveLobbyAsync);
-
-        confirmationYesButton.onClick.AddListener(OnConfirmationYes);
-        confirmationNoButton.onClick.AddListener(OnConfirmationNo);
+        await Task.Yield();
     }
 
-    public string GetPlayerName(PlayerRef player)
-    {
-        if (_playerNameMap.TryGetValue(player, out var name))
-            return name;
-        return "Unknown";
-    }
+    // UI Actions
 
-    public void ReleasePlayerName(string playerName)
+    private void OnJoinLobbyClicked()
     {
-        if (!allowedPlayerNames.Contains(playerName))
-        {
-            allowedPlayerNames.Add(playerName);
-            allowedPlayerNames.Sort();
-        }
+        // Switch from IntroPanel to LobbyPanel (session list and create/join UI)
+        if (introPanel != null) introPanel.SetActive(false);
+        if (lobbyPanel != null) lobbyPanel.SetActive(true);
+
+        if (createSessionButton != null) createSessionButton.interactable = true;
+        if (leaveLobbyButton != null) leaveLobbyButton.interactable = true;
     }
 
     private async void OnJoinOrCreateClicked(bool isCreate)
     {
-        _desiredSessionName = sessionNameInput.text.Trim();
+        _desiredSessionName = sessionNameInput != null ? sessionNameInput.text.Trim() : "";
         if (string.IsNullOrEmpty(_desiredSessionName))
         {
-            ShowConfirmationDialog("Session name cannot be empty.", null, () => HideConfirmationDialog());
+            ShowConfirmationDialog("Session name cannot be empty.", null, HideConfirmationDialog);
             return;
         }
 
@@ -128,10 +139,121 @@ public class LobbyManager : MonoBehaviour, INetworkRunnerCallbacks
             await TryJoinSession(_desiredSessionName);
     }
 
+    private async Task TryJoinSession(string sessionName)
+    {
+        if (_runner == null)
+        {
+            ShowConfirmationDialog("Network runner not available.", null, HideConfirmationDialog);
+            return;
+        }
+
+        if (joinLobbyButton != null) joinLobbyButton.interactable = false;
+        if (createSessionButton != null) createSessionButton.interactable = false;
+
+        if (_runner.IsRunning)
+        {
+            await _runner.Shutdown();
+            _runner = gameObject.AddComponent<NetworkRunner>();
+            if (_runner.GetComponent<NetworkSceneManagerDefault>() == null)
+                _runner.gameObject.AddComponent<NetworkSceneManagerDefault>();
+            _runner.ProvideInput = true;
+            _runner.AddCallbacks(this);
+        }
+
+        var startArgs = new StartGameArgs
+        {
+            GameMode = GameMode.Client,
+            SessionName = sessionName,
+            Scene = gameScene,
+            IsOpen = true,
+            IsVisible = true
+        };
+
+        var result = await _runner.StartGame(startArgs);
+        if (result.Ok)
+        {
+            _inSession = true;
+            Debug.Log($"Joined session '{sessionName}' as Client.");
+            ShowSessionUI();
+        }
+        else
+        {
+            Debug.LogWarning($"Failed to join session '{sessionName}': {result.ErrorMessage}");
+            ShowConfirmationDialog(
+                $"Session '{sessionName}' does not exist. Do you want to create it?",
+                async () => await TryCreateSession(sessionName),
+                HideConfirmationDialog);
+        }
+    }
+
+    private async Task TryCreateSession(string sessionName)
+    {
+        if (_runner == null)
+        {
+            ShowConfirmationDialog("Network runner not available.", null, HideConfirmationDialog);
+            return;
+        }
+
+        if (joinLobbyButton != null) joinLobbyButton.interactable = false;
+        if (createSessionButton != null) createSessionButton.interactable = false;
+
+        if (_runner.IsRunning)
+        {
+            await _runner.Shutdown();
+            _runner = gameObject.AddComponent<NetworkRunner>();
+            if (_runner.GetComponent<NetworkSceneManagerDefault>() == null)
+                _runner.gameObject.AddComponent<NetworkSceneManagerDefault>();
+            _runner.ProvideInput = true;
+            _runner.AddCallbacks(this);
+        }
+
+        var startArgs = new StartGameArgs
+        {
+            GameMode = GameMode.Host,
+            SessionName = sessionName,
+            Scene = gameScene,
+            IsOpen = true,
+            IsVisible = true
+        };
+
+        var result = await _runner.StartGame(startArgs);
+        if (result.Ok)
+        {
+            _inSession = true;
+            Debug.Log($"Created and joined session '{sessionName}' as Host.");
+            ShowSessionUI();
+        }
+        else
+        {
+            Debug.LogWarning($"Failed to create session '{sessionName}': {result.ErrorMessage}");
+            ShowConfirmationDialog(
+                $"Session '{sessionName}' already exists. Do you want to join it?",
+                async () => await TryJoinSession(sessionName),
+                HideConfirmationDialog);
+        }
+    }
+
+    private void ShowSessionUI()
+    {
+        // Switch UI to Session Panel, hide Lobby panel and Intro panel
+        if (lobbyPanel != null) lobbyPanel.SetActive(false);
+        if (introPanel != null) introPanel.SetActive(false);
+        if (sessionPanel != null) sessionPanel.SetActive(true);
+
+        if (createSessionButton != null) createSessionButton.interactable = false;
+        if (joinLobbyButton != null) joinLobbyButton.interactable = false;
+        if (leaveLobbyButton != null) leaveLobbyButton.interactable = true;
+        if (leaveSessionButton != null) leaveSessionButton.interactable = true;
+
+        UpdatePlayerList();
+    }
+
     private void ShowConfirmationDialog(string message, UnityEngine.Events.UnityAction onYes, UnityEngine.Events.UnityAction onNo)
     {
+        if (confirmationPanel == null) return;
+
         confirmationPanel.SetActive(true);
-        confirmationText.text = message;
+        if (confirmationText != null) confirmationText.text = message;
 
         ClearConfirmationActions();
 
@@ -160,129 +282,20 @@ public class LobbyManager : MonoBehaviour, INetworkRunnerCallbacks
 
     private void ClearConfirmationActions()
     {
-        confirmationYesButton.onClick.RemoveAllListeners();
-        confirmationNoButton.onClick.RemoveAllListeners();
+        if (confirmationYesButton != null) confirmationYesButton.onClick.RemoveAllListeners();
+        if (confirmationNoButton != null) confirmationNoButton.onClick.RemoveAllListeners();
     }
 
     private void HideConfirmationDialog()
     {
         ClearConfirmationActions();
-        confirmationPanel.SetActive(false);
+        if (confirmationPanel != null) confirmationPanel.SetActive(false);
     }
 
-    private void OnConfirmationYes()
-    {
-        // Intentionally empty, handled dynamically by added listeners.
-    }
+    private void OnConfirmationYes() {/* listeners handle actual actions */}
+    private void OnConfirmationNo() { HideConfirmationDialog(); }
 
-    private void OnConfirmationNo()
-    {
-        HideConfirmationDialog();
-    }
-
-    private async Task TryJoinSession(string sessionName)
-    {
-        joinLobbyButton.interactable = false;
-        createSessionButton.interactable = false;
-
-        if (_runner.IsRunning)
-        {
-            await _runner.Shutdown();
-            // After shutdown, will get runner from NetworkManager again
-            _runner = NetworkManager.Instance?.Runner;
-            if (_runner == null)
-            {
-                Debug.LogError("LobbyManager: Could not find NetworkRunner from NetworkManager after shutdown.");
-                return;
-            }
-            _runner.ProvideInput = true;
-            _runner.AddCallbacks(this);
-        }
-
-        var startArgs = new StartGameArgs()
-        {
-            GameMode = GameMode.Client,
-            SessionName = sessionName,
-            Scene = gameScene,
-            IsOpen = true,
-            IsVisible = true
-        };
-
-        var result = await _runner.StartGame(startArgs);
-        if (result.Ok)
-        {
-            _inRoom = true;
-            Debug.Log($"Joined session '{sessionName}' as Client.");
-            ShowRoomUI();
-        }
-        else
-        {
-            Debug.LogWarning($"Failed to join session '{sessionName}': {result.ErrorMessage}");
-            ShowConfirmationDialog(
-                $"Session '{sessionName}' does not exist. Do you want to create it?",
-                async () => await TryCreateSession(sessionName),
-                () => HideConfirmationDialog());
-        }
-    }
-
-    private async Task TryCreateSession(string sessionName)
-    {
-        joinLobbyButton.interactable = false;
-        createSessionButton.interactable = false;
-
-        if (_runner.IsRunning)
-        {
-            await _runner.Shutdown();
-            _runner = NetworkManager.Instance?.Runner;
-            if (_runner == null)
-            {
-                Debug.LogError("LobbyManager: Could not find NetworkRunner from NetworkManager after shutdown.");
-                return;
-            }
-            _runner.ProvideInput = true;
-            _runner.AddCallbacks(this);
-        }
-
-        var startArgs = new StartGameArgs()
-        {
-            GameMode = GameMode.Host,
-            SessionName = sessionName,
-            Scene = gameScene,
-            IsOpen = true,
-            IsVisible = true
-        };
-
-        var result = await _runner.StartGame(startArgs);
-        if (result.Ok)
-        {
-            _inRoom = true;
-            Debug.Log($"Created and joined session '{sessionName}' as Host.");
-            ShowRoomUI();
-        }
-        else
-        {
-            Debug.LogWarning($"Failed to create session '{sessionName}': {result.ErrorMessage}");
-            ShowConfirmationDialog(
-                $"Session '{sessionName}' already exists. Do you want to join it?",
-                async () => await TryJoinSession(sessionName),
-                () => HideConfirmationDialog());
-        }
-    }
-
-    private void ShowRoomUI()
-    {
-        sessionListContainer.gameObject.SetActive(false);
-        roomPanel.SetActive(true);
-
-        createSessionButton.interactable = false;
-        joinLobbyButton.interactable = false;
-        leaveLobbyButton.interactable = true;
-        leaveRoomButton.interactable = true;
-
-        UpdatePlayerList();
-    }
-
-    private async void LeaveRoomAsync()
+    private async void LeaveSessionAsync()
     {
         if (_runner != null && _runner.IsRunning)
         {
@@ -302,118 +315,129 @@ public class LobbyManager : MonoBehaviour, INetworkRunnerCallbacks
 
     private void ResetUI()
     {
-        _inRoom = false;
+        _inSession = false;
 
-        joinLobbyButton.interactable = true;
-        createSessionButton.interactable = true;
-        leaveLobbyButton.interactable = false;
-        leaveRoomButton.interactable = false;
+        if (introPanel != null) introPanel.SetActive(true);
+        if (lobbyPanel != null) lobbyPanel.SetActive(false);
+        if (sessionPanel != null) sessionPanel.SetActive(false);
+        if (confirmationPanel != null) confirmationPanel.SetActive(false);
 
-        sessionListContainer.gameObject.SetActive(false);
-        roomPanel.SetActive(false);
-        confirmationPanel.SetActive(false);
+        if (joinLobbyButton != null) joinLobbyButton.interactable = true;
+        if (createSessionButton != null) createSessionButton.interactable = true;
+        if (leaveSessionButton != null) leaveSessionButton.interactable = false;
+        if (leaveLobbyButton != null) leaveLobbyButton.interactable = false;
 
-        foreach (Transform child in sessionListContainer)
-            Destroy(child.gameObject);
-
-        foreach (Transform child in playerListContainer)
-            Destroy(child.gameObject);
+        if (sessionListContainer != null)
+        {
+            foreach (Transform t in sessionListContainer) Destroy(t.gameObject);
+        }
+        if (playerListContainer != null)
+        {
+            foreach (Transform t in playerListContainer) Destroy(t.gameObject);
+        }
 
         _playerNameMap.Clear();
     }
 
     private void UpdatePlayerList()
     {
-        foreach (Transform child in playerListContainer)
-            Destroy(child.gameObject);
+        if (playerListContainer == null || playerTextPrefab == null) return;
 
-        if (_runner != null && _runner.IsRunning)
+        foreach (Transform child in playerListContainer) Destroy(child.gameObject);
+
+        if (_runner == null || !_runner.IsRunning) return;
+
+        foreach (PlayerRef p in _runner.ActivePlayers)
         {
-            foreach (PlayerRef player in _runner.ActivePlayers)
-            {
-                string playerName = GetOrAssignPlayerName(player);
-                GameObject playerText = Instantiate(playerTextPrefab, playerListContainer);
-                TMP_Text textComp = playerText.GetComponent<TMP_Text>();
-                textComp.text = player == _runner.LocalPlayer ? $"{playerName} (YOU)" : playerName;
-            }
+            string name = GetOrAssignPlayerName(p);
+            GameObject entry = Instantiate(playerTextPrefab, playerListContainer);
+            TMP_Text textComp = entry.GetComponentInChildren<TMP_Text>();
+            if (textComp != null) textComp.text = p == _runner.LocalPlayer ? $"{name} (YOU)" : name;
         }
     }
 
     private string GetOrAssignPlayerName(PlayerRef player)
     {
-        if (_playerNameMap.TryGetValue(player, out string name))
-            return name;
+        if (_playerNameMap.TryGetValue(player, out string already)) return already;
 
-        HashSet<string> usedNames = new HashSet<string>(_playerNameMap.Values);
+        var used = new HashSet<string>(_playerNameMap.Values);
         foreach (var candidate in allowedPlayerNames)
         {
-            if (!usedNames.Contains(candidate))
+            if (!used.Contains(candidate))
             {
                 _playerNameMap[player] = candidate;
                 return candidate;
             }
         }
 
-        string fallbackName = $"Player {player.PlayerId}";
-        _playerNameMap[player] = fallbackName;
-        return fallbackName;
+        string fallback = $"Player {player.PlayerId}";
+        _playerNameMap[player] = fallback;
+        return fallback;
+    }
+
+    public void ReleasePlayerName(string playerName)
+    {
+        if (string.IsNullOrEmpty(playerName)) return;
+
+        var toRemove = new List<PlayerRef>();
+        foreach (var kv in _playerNameMap)
+        {
+            if (kv.Value == playerName)
+                toRemove.Add(kv.Key);
+        }
+        foreach (var pr in toRemove)
+            _playerNameMap.Remove(pr);
+    }
+
+    public string GetPlayerName(PlayerRef player)
+    {
+        if (_playerNameMap.TryGetValue(player, out var n)) return n;
+        return $"Player {player.PlayerId}";
     }
 
     #region INetworkRunnerCallbacks
 
     public void OnPlayerJoined(NetworkRunner runner, PlayerRef player)
     {
-        Debug.Log($"Player {player.PlayerId} joined the session.");
-        if (_inRoom)
-            UpdatePlayerList();
+        Debug.Log($"Player {player.PlayerId} joined.");
+        GetOrAssignPlayerName(player);
+        if (_inSession) UpdatePlayerList();
     }
 
     public void OnPlayerLeft(NetworkRunner runner, PlayerRef player)
     {
-        Debug.Log($"Player {player.PlayerId} left the session.");
-
-        if (_playerNameMap.ContainsKey(player))
-            _playerNameMap.Remove(player);
-
-        if (_inRoom)
-            UpdatePlayerList();
+        Debug.Log($"Player {player.PlayerId} left.");
+        if (_playerNameMap.ContainsKey(player)) _playerNameMap.Remove(player);
+        if (_inSession) UpdatePlayerList();
     }
 
-    public void OnConnectedToServer(NetworkRunner runner)
-    {
-        Debug.Log("Connected to server.");
-    }
+    public void OnConnectedToServer(NetworkRunner runner) { Debug.Log("Connected to server."); }
+    public void OnShutdown(NetworkRunner runner, ShutdownReason reason) { Debug.Log($"Runner Shutdown: {reason}"); ResetUI(); }
+    public void OnConnectFailed(NetworkRunner runner, NetAddress addr, NetConnectFailedReason reason) { Debug.LogError($"Connect failed: {reason}"); ResetUI(); }
+    public void OnDisconnectedFromServer(NetworkRunner runner, NetDisconnectReason reason) { Debug.Log($"Disconnected: {reason}"); ResetUI(); }
 
-    public void OnShutdown(NetworkRunner runner, ShutdownReason reason)
-    {
-        Debug.Log($"Runner Shutdown: {reason}");
-        ResetUI();
-    }
-
-    public void OnConnectFailed(NetworkRunner runner, NetAddress addr, NetConnectFailedReason reason)
-    {
-        Debug.LogError($"Connection failed to {addr}: {reason}");
-        ResetUI();
-    }
-
-    public void OnDisconnectedFromServer(NetworkRunner runner, NetDisconnectReason reason)
-    {
-        Debug.Log($"Disconnected from server: {reason}");
-        ResetUI();
-    }
-
-    public void OnSceneLoadDone(NetworkRunner runner)
-    {
-        Debug.Log($"Scene loaded successfully by NetworkRunner.");
-        roomPanel.SetActive(true);
-        leaveRoomButton.interactable = true;
-        UpdatePlayerList();
-    }
-
+    public void OnSceneLoadDone(NetworkRunner runner) { Debug.Log("Scene loaded."); if (sessionPanel != null) sessionPanel.SetActive(true); UpdatePlayerList(); }
     public void OnSessionListUpdated(NetworkRunner runner, List<SessionInfo> sessions)
     {
-        Debug.Log($"OnSessionListUpdated called. Sessions count: {sessions.Count}");
-        // will need to Update session list UI here
+        Debug.Log($"Session list updated: {sessions.Count} sessions.");
+        if (sessionListContainer == null || sessionButtonPrefab == null) return;
+
+        foreach (Transform c in sessionListContainer) Destroy(c.gameObject);
+
+        foreach (var s in sessions)
+        {
+            if (!s.IsOpen || !s.IsVisible || s.PlayerCount >= s.MaxPlayers) continue;
+
+            GameObject btnObj = Instantiate(sessionButtonPrefab, sessionListContainer);
+            TMP_Text t = btnObj.GetComponentInChildren<TMP_Text>();
+            if (t != null) t.text = $"{s.Name} ({s.PlayerCount}/{s.MaxPlayers})";
+            Button b = btnObj.GetComponent<Button>();
+            if (b != null)
+            {
+                string nameCopy = s.Name;
+                b.onClick.AddListener(() => { _ = TryJoinSession(nameCopy); });
+            }
+        }
     }
 
     public void OnConnectRequest(NetworkRunner runner, NetworkRunnerCallbackArgs.ConnectRequest req, byte[] token) { }
