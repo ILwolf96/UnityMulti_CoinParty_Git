@@ -10,11 +10,11 @@ using UnityEngine.SceneManagement;
 public class LobbyManager : MonoBehaviour, INetworkRunnerCallbacks
 {
     [Header("Intro Panel (first screen)")]
-    [SerializeField] private GameObject introPanel = null;           // The very first screen with "Join Lobby" button
+    [SerializeField] private GameObject introPanel = null;           
     [SerializeField] private Button joinLobbyButton = null;
 
     [Header("Lobby Panel (session list and create/join UI)")]
-    [SerializeField] private GameObject lobbyPanel = null;           // Panel that holds session list ScrollView and session creation UI
+    [SerializeField] private GameObject lobbyPanel = null;           // Panel that holds session list ScrollView and other session UI
     [SerializeField] private Transform sessionListContainer = null;  // ScrollView Content container for session buttons
     [SerializeField] private GameObject sessionButtonPrefab = null;  // Prefab for session buttons
     [SerializeField] private TMP_InputField sessionNameInput = null; // Input field for new session name
@@ -26,17 +26,21 @@ public class LobbyManager : MonoBehaviour, INetworkRunnerCallbacks
     [SerializeField] private GameObject playerTextPrefab = null;     // Prefab for displaying player names
     [SerializeField] private Button leaveSessionButton = null;       // Button to leave the session
 
+    [Header("Start/Waiting Button (Session Panel)")]
+    [SerializeField] private Button startGameButton = null;          // Visible only for Host, triggers game start
+    [SerializeField] private Button waitingForHostButton = null;     // Visible only for Clients, does nothing
+
     [Header("Leave Lobby UI")]
-    [SerializeField] private Button leaveLobbyButton = null;         // Button to leave lobby (session list) screen
+    [SerializeField] private Button leaveLobbyButton = null;         
 
     [Header("Confirmation UI (modal)")]
-    [SerializeField] private GameObject confirmationPanel = null;    // Popup panel for confirmation dialogs
+    [SerializeField] private GameObject confirmationPanel = null;    
     [SerializeField] private TMP_Text confirmationText = null;
     [SerializeField] private Button confirmationYesButton = null;
     [SerializeField] private Button confirmationNoButton = null;
 
     [Header("Scene to load on game start")]
-    [SerializeField] private SceneRef gameScene;
+    [SerializeField] private string gameSceneName = "GameScene"; 
 
     [Header("Settings")]
     [SerializeField] private int maxPlayersPerSession = 6;
@@ -60,7 +64,6 @@ public class LobbyManager : MonoBehaviour, INetworkRunnerCallbacks
 
     private void Awake()
     {
-        // Singleton pattern to persist LobbyManager instance across scenes
         if (Instance != null && Instance != this)
         {
             Destroy(gameObject);
@@ -94,6 +97,8 @@ public class LobbyManager : MonoBehaviour, INetworkRunnerCallbacks
 
         if (confirmationYesButton != null) confirmationYesButton.onClick.AddListener(OnConfirmationYes);
         if (confirmationNoButton != null) confirmationNoButton.onClick.AddListener(OnConfirmationNo);
+
+        if (startGameButton != null) startGameButton.onClick.AddListener(OnStartGameClicked);
     }
 
     private async Task EnsureRunner()
@@ -116,7 +121,6 @@ public class LobbyManager : MonoBehaviour, INetworkRunnerCallbacks
 
     private void OnJoinLobbyClicked()
     {
-        // Switch from IntroPanel to LobbyPanel (session list and create/join UI)
         if (introPanel != null) introPanel.SetActive(false);
         if (lobbyPanel != null) lobbyPanel.SetActive(true);
 
@@ -164,7 +168,7 @@ public class LobbyManager : MonoBehaviour, INetworkRunnerCallbacks
         {
             GameMode = GameMode.Client,
             SessionName = sessionName,
-            Scene = gameScene,
+            Scene = default, 
             IsOpen = true,
             IsVisible = true
         };
@@ -211,7 +215,7 @@ public class LobbyManager : MonoBehaviour, INetworkRunnerCallbacks
         {
             GameMode = GameMode.Host,
             SessionName = sessionName,
-            Scene = gameScene,
+            Scene = default, // Host won't load scene here; will load when Start Game clicked
             IsOpen = true,
             IsVisible = true
         };
@@ -235,7 +239,6 @@ public class LobbyManager : MonoBehaviour, INetworkRunnerCallbacks
 
     private void ShowSessionUI()
     {
-        // Switch UI to Session Panel, hide Lobby panel and Intro panel
         if (lobbyPanel != null) lobbyPanel.SetActive(false);
         if (introPanel != null) introPanel.SetActive(false);
         if (sessionPanel != null) sessionPanel.SetActive(true);
@@ -246,6 +249,15 @@ public class LobbyManager : MonoBehaviour, INetworkRunnerCallbacks
         if (leaveSessionButton != null) leaveSessionButton.interactable = true;
 
         UpdatePlayerList();
+
+        // Show start game button only if host, else show waiting button
+        bool isHost = _runner != null && _runner.IsServer;
+
+        if (startGameButton != null)
+            startGameButton.gameObject.SetActive(isHost);
+
+        if (waitingForHostButton != null)
+            waitingForHostButton.gameObject.SetActive(!isHost);
     }
 
     private void ShowConfirmationDialog(string message, UnityEngine.Events.UnityAction onYes, UnityEngine.Events.UnityAction onNo)
@@ -393,6 +405,24 @@ public class LobbyManager : MonoBehaviour, INetworkRunnerCallbacks
     {
         if (_playerNameMap.TryGetValue(player, out var n)) return n;
         return $"Player {player.PlayerId}";
+    }
+
+    private void OnStartGameClicked()
+    {
+        if (_runner == null)
+        {
+            Debug.LogWarning("NetworkRunner not initialized!");
+            return;
+        }
+
+        if (!_runner.IsServer)
+        {
+            Debug.LogWarning("Only the Host can start the game.");
+            return;
+        }
+
+        Debug.Log("Host started the game.");
+        SceneManager.LoadScene(gameSceneName);
     }
 
     #region INetworkRunnerCallbacks
